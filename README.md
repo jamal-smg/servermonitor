@@ -1,4 +1,4 @@
-# Network Monitoring Script
+# Server Monitoring Script
 
 ## Description
 This script monitors network connections on both Windows and Linux servers and logs the data into a SQLite database. It utilizes SSH for Linux servers and WinRM for Windows servers to gather network connection information.
