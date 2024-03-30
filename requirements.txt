@@ -1,0 +1,9 @@
+paramiko
+pywinrm
+sqlite3
+csv
+re
+shutil
+queue
+datetime
+dotenv
