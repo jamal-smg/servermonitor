@@ -3,38 +3,46 @@ import sqlite3
 import threading
 import csv
 import re
+import queue
+import shutil
+from datetime import datetime
 import paramiko
 import winrm
-import shutil
-import queue
-from queue import Queue
-from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Read hosts
+# read servers hosts from csv
 def read_hosts_from_file(filename):
     hosts = []
-    with open(filename, 'r', encoding='utf-8-sig') as file:
-        csv_reader = csv.DictReader(file) 
-        for row in csv_reader:
-            if 'hostname' in row and 'os' in row:
-                hosts.append({"hostname": row['hostname'], "os": row['os']})
-            else:
-                print("Missing keys in row:", row)
+    try:
+        with open(filename, 'r', encoding='utf-8-sig') as file:
+            csv_reader = csv.DictReader(file)
+            print("Column Headers:")
+            print(csv_reader.fieldnames) 
+            for row in csv_reader:
+                if 'hostname' in row and 'os' in row:
+                    hosts.append({"hostname": row['hostname'], "os": row['os']})
+                else:
+                    print("Missing keys in row:", row)
+    except Exception as e:
+        log_error('', f"Error reading hosts from file: {e}")
     return hosts
 
-# Read Credentials from .env file
+# read credentials from .env file
 def read_credentials_from_env():
-    return {
-        'windows_user': os.environ.get('windowsuser'),
-        'windows_pass': os.environ.get('windowspass'),
-        'linux_user': os.environ.get('linuxuser'),
-        'linux_pass': os.environ.get('linuxpass')
-    }
-
-# initiate ssh (Linux)
+    try:
+        return {
+            'windows_user': os.environ.get('windowsuser'),
+            'windows_pass': os.environ.get('windowspass'),
+            'linux_user': os.environ.get('linuxuser'),
+            'linux_pass': os.environ.get('linuxpass')
+        }
+    except Exception as e:
+        log_error('', f"Error reading credentials from environment variables: {e}")
+        return {}
+    
+#Linux connection
 def ssh_connection(host, username, password, command, queue):
     try:
         client = paramiko.SSHClient()
@@ -45,13 +53,13 @@ def ssh_connection(host, username, password, command, queue):
         print(output)
         queue.put(output)
     except paramiko.AuthenticationException as e:
-        log_error(host, f"Authentication failed: {e}")
+        log_error(host, f"Authentication failed for {host}: {e}")
     except Exception as e:
-        log_error(host, f"Error executing SSH command: {e}")
+        log_error(host, f"Error executing SSH command on {host}: {e}")
     finally:
         queue.put(None)
 
-# initiate winrm(Windows)
+# Windows connection
 def winrm_connection(host, username, password, command, queue):
     try:
         session = winrm.Session(host, auth=(username, password))
@@ -60,9 +68,9 @@ def winrm_connection(host, username, password, command, queue):
         print(output)
         queue.put(output)
     except winrm.exceptions.InvalidCredentialsError as e:
-        log_error(host, f"Invalid credentials: {e}")
+        log_error(host, f"Invalid credentials for {host}: {e}")
     except Exception as e:
-        log_error(host, f"Error executing WinRM command: {e}")
+        log_error(host, f"Error executing WinRM command on {host}: {e}")
     finally:
         queue.put(None)
 
@@ -132,6 +140,7 @@ def backup_database():
     except Exception as e:
         log_error('', f"Error creating database backup: {e}")
 
+# Error logging
 def log_error(hostname, message):
     try:
         conn = sqlite3.connect('server.db')
@@ -156,53 +165,58 @@ def create_error_log_table():
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"Error creating error log table: {e}")        
+        log_error('', f"Error creating error log table: {e}")  
 
-# calling functions
+threads_finished = False
+
+
+# Calling functions
 def main():
     global threads_finished
-    
-    hosts = read_hosts_from_file("hosts.csv")
-    credentials = read_credentials_from_env()
-    
-    windows_hosts = [host for host in hosts if host['os'] == 'Windows']
-    linux_hosts = [host for host in hosts if host['os'] == 'Linux']
-    create_error_log_table()
-    conn = sqlite3.connect('server.db')
-    c = conn.cursor()
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS network_connections (
-                 entry_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                 timestamp TEXT,
-                 sourceHostname TEXT,
-                 sourceIP TEXT,
-                 sourcePort TEXT,
-                 destinationPort TEXT,
-                 destinationIP TEXT,
-                 connectionState TEXT
-                 )''')
-    
-    windows_queue = queue.Queue()
-    for host in windows_hosts:
-        threading.Thread(target=winrm_connection, args=(host['hostname'], credentials['windows_user'], credentials['windows_pass'], "Get-NetTCPConnection", windows_queue)).start()
-    
-    linux_queue = queue.Queue()
-    for host in linux_hosts:
-        threading.Thread(target=ssh_connection, args=(host['hostname'], credentials['linux_user'], credentials['linux_pass'], "netstat -tuln", linux_queue)).start()
-    
-    for thread in threading.enumerate():
-        if thread != threading.current_thread():
-            thread.join()
-    threads_finished = True
-    
-    windows_data = [process_windows_console_output(data, host['hostname']) for data in iter(windows_queue.get, None) for host in windows_hosts]
-    linux_data = [process_linux_console_output(data, host['hostname']) for data in iter(linux_queue.get, None) for host in linux_hosts]
-    
-    write_to_database(windows_data + linux_data, conn)
-    
-    conn.close()
-    
-    backup_database()
+    try:
+        hosts = read_hosts_from_file("hosts.csv")
+        credentials = read_credentials_from_env()
+        
+        windows_hosts = [host for host in hosts if host['os'] == 'Windows']
+        linux_hosts = [host for host in hosts if host['os'] == 'Linux']
+        create_error_log_table()
+        conn = sqlite3.connect('server.db')
+        c = conn.cursor()
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS network_connections (
+                     entry_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                     timestamp TEXT,
+                     sourceHostname TEXT,
+                     sourceIP TEXT,
+                     sourcePort TEXT,
+                     destinationPort TEXT,
+                     destinationIP TEXT,
+                     connectionState TEXT
+                     )''')
+        
+        windows_queue = queue.Queue()
+        for host in windows_hosts:
+            threading.Thread(target=winrm_connection, args=(host['hostname'], credentials['windows_user'], credentials['windows_pass'], "Get-NetTCPConnection", windows_queue)).start()
+        
+        linux_queue = queue.Queue()
+        for host in linux_hosts:
+            threading.Thread(target=ssh_connection, args=(host['hostname'], credentials['linux_user'], credentials['linux_pass'], "netstat -tuln", linux_queue)).start()
+        
+        for thread in threading.enumerate():
+            if thread != threading.current_thread():
+                thread.join()
+        threads_finished = True
+        
+        windows_data = [process_windows_console_output(data, host['hostname']) for data in iter(windows_queue.get, None) for host in windows_hosts]
+        linux_data = [process_linux_console_output(data, host['hostname']) for data in iter(linux_queue.get, None) for host in linux_hosts]
+        
+        write_to_database(windows_data + linux_data, conn)
+        
+        conn.close()
+        
+        backup_database()
+    except Exception as e:
+        log_error('', f"Error in main function: {e}")
 
 if __name__ == "__main__":
     main()
