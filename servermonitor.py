@@ -18,8 +18,6 @@ def read_hosts_from_file(filename):
     try:
         with open(filename, 'r', encoding='utf-8-sig') as file:
             csv_reader = csv.DictReader(file)
-            print("Column Headers:")
-            print(csv_reader.fieldnames) 
             for row in csv_reader:
                 if 'hostname' in row and 'os' in row:
                     hosts.append({"hostname": row['hostname'], "os": row['os']})
